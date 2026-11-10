@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2008 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): verified UTF-8 file transfer.
 
 #include <fshell/ioutils.h>
 #include "xmodem.h"
@@ -603,6 +603,7 @@ void CCmdXmodem::Unget(TChar aChar)
 
 void CCmdXmodem::PrepareConsoleToTransferL()
 	{
+	iStarted = ETrue; // restore modes/capture even if preparation itself leaves
 	Write(_L("Please start the file transfer in your terminal...\r\n"));
 	User::LeaveIfError(Stdin().CaptureAllKeys());			// To prevent other things (like fshell) interpreting binary data as special key presses (like cntrl-C).
 	LeaveIfErr(Stdin().SetMode(RIoReadWriteHandle::EBinary), _L("Unable to set stdin to binary mode"));	// To prevent vt100cons from scanning for ANSI escape sequences. 
@@ -632,13 +633,17 @@ void CCmdXmodem::SendBlockL(const TDesC& aBlock)
 		{
 		iBuf = HBufC::NewL(iBlockSize + ProtocolOverhead());
 		}
+	else if (iBuf->Des().MaxLength() < iBlockSize + ProtocolOverhead())
+		{
+		iBuf = iBuf->ReAllocL(iBlockSize + ProtocolOverhead());
+		}
 
 	TPtr buf(iBuf->Des());
 
 	FOREVER
 		{
 		buf.Zero();
-		buf.Append((TUint16)KByteSoh);
+		buf.Append((TUint16)(iBlockSize == KLargeBlockSize ? KByteStx : KByteSoh));
 		buf.Append((TUint16)iPacketNumber);
 		buf.Append((TUint16)((TUint8)(~iPacketNumber)));
 		buf.Append(aBlock);
@@ -798,7 +803,7 @@ again:
 	// workaround for a compiler bug: and b0 and ~b1 with 0xff, otherwise some compilers will compare
 	// the full 32-bit values, the top 3 bytes of which contain garbage. Observed with WINSW and GCCE
 	// compilers.
-	if (((b0 & 0xff) == ((~b1) & 0xff)) && ((b0 == iPacketNumber) || (b0 == (iPacketNumber - 1))) && CheckBlock())
+	if (((b0 & 0xff) == ((~b1) & 0xff)) && ((b0 == iPacketNumber) || (b0 == (TUint8)(iPacketNumber - 1))) && CheckBlock())
 		{
 		Progress(_L("Block successfully received\r\n"));
 		if ((*iBuf)[0] == iPacketNumber)
@@ -860,14 +865,16 @@ void CCmdXmodem::SendFileL(const TDesC& aFileName)
 	{
 	Progress(_L("Sending file \"%S\"...\r\n"), &aFileName);
 	RFile file;
-	User::LeaveIfError(file.Open(FsL(), aFileName, EFileRead));
+	User::LeaveIfError(file.Open(FsL(), aFileName, EFileRead | EFileShareReadersOnly));
 	CleanupClosePushL(file);
 
 	HBufC8* buf = HBufC8::NewLC(iBlockSize);
 	HBufC* wideBuf = HBufC::NewLC(iBlockSize);
 	TPtr8 bufPtr(buf->Des());
-	while ((file.Read(bufPtr, iBlockSize) == KErrNone) && (buf->Length() > 0))
+	for (;;)
 		{
+		User::LeaveIfError(file.Read(bufPtr, iBlockSize));
+		if (bufPtr.Length() == 0) break;
 		wideBuf->Des().Copy(*buf);
 		SendBlockL(*wideBuf);
 		}
@@ -1023,7 +1030,8 @@ void CCmdXmodem::HandleLeave(TInt aError)
 	if (iStarted)
 		{
 		Abort();
-		CleanupClonsoleAfterTransferL();
+		TRAP_IGNORE(CleanupClonsoleAfterTransferL());
+		Stdin().CancelCaptureAllKeys();
 		}
 	CCommandBase::HandleLeave(aError);
 	}

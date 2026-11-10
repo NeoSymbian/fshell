@@ -2,16 +2,22 @@
 // 
 // Copyright (c) 2008 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): verified UTF-8 file transfer.
 
 #include <fshell/ioutils.h>
 #include "ymodem.h"
+#include "ymodem_meta.h"
+#include <fshell/ltkutils.h>
+#include <fshell/common.mmh>
+#if defined(FSHELL_CRYPTO_SUPPORT) && defined(FSHELL_SHA2_SUPPORT)
+#include <hash.h>
+#endif
 
 using namespace IoUtils;
 
@@ -27,10 +33,12 @@ CCommandBase* CCmdYmodem::NewLC()
 CCmdYmodem::~CCmdYmodem()
 	{
 	iFileNames.Close();
+	delete iExpectedSha256;
 	}
 
 CCmdYmodem::CCmdYmodem()
 	{
+	iBlockSize = 1024;
 	}
 
 const TDesC& CCmdYmodem::Name() const
@@ -39,231 +47,201 @@ const TDesC& CCmdYmodem::Name() const
 	return KName;
 	}
 
-class TFailedFile
+namespace
 	{
-public:
-	TFailedFile();
-public:
-	TInt iError;
-	TFileName2 iFileName;
-	};
+	struct TReceiveCleanup
+		{
+		RFs& iFs;
+		RFile iFile;
+		TFileName iTemporary;
+		TReceiveCleanup(RFs& aFs) : iFs(aFs) {}
+		};
+	void CleanupReceive(TAny* aPtr)
+		{
+		TReceiveCleanup& c = *static_cast<TReceiveCleanup*>(aPtr);
+		c.iFile.Close();
+		if (c.iTemporary.Length()) c.iFs.Delete(c.iTemporary);
+		}
+	TInt HexDigit(TUint aChar)
+		{
+		if (aChar >= '0' && aChar <= '9') return aChar - '0';
+		if (aChar >= 'a' && aChar <= 'f') return aChar - 'a' + 10;
+		if (aChar >= 'A' && aChar <= 'F') return aChar - 'A' + 10;
+		return -1;
+		}
+	}
 
-TFailedFile::TFailedFile()
-	: iError(KErrNone)
+void CCmdYmodem::ReceiveFileL(const TFileName2& aName, TInt aSize)
 	{
+	// Never receive directly onto an existing destination. RFs::Replace is
+	// requested only after complete, flushed, optionally hash-verified input.
+	if (!iOverwrite)
+		{
+		TEntry entry;
+		TInt err = FsL().Entry(aName, entry);
+		if (err == KErrNone) User::Leave(KErrAlreadyExists);
+		if (err != KErrNotFound && err != KErrPathNotFound) User::Leave(err);
+		}
+	TReceiveCleanup cleanup(FsL());
+	CleanupStack::PushL(TCleanupItem(&CleanupReceive, &cleanup));
+	User::LeaveIfError(cleanup.iFile.Temp(FsL(), aName.DriveAndPath(), cleanup.iTemporary, EFileWrite));
+#if defined(FSHELL_CRYPTO_SUPPORT) && defined(FSHELL_SHA2_SUPPORT)
+	CMessageDigest* digest = NULL;
+	if (iExpectedSha256)
+		{
+		digest = CMessageDigestFactory::NewDigestL(CMessageDigest::ESHA256);
+		CleanupStack::PushL(digest);
+		}
+#endif
+	TInt remaining = aSize;
+	TBool firstBlock = ETrue, finalBlock = EFalse;
+	if (SendSyncL() == EEot)
+		{
+		if (remaining) User::Leave(KErrCorrupt);
+		finalBlock = ETrue;
+		}
+	while (!finalBlock)
+		{
+		TPtrC block(ReceiveBlockL(firstBlock, finalBlock));
+		firstBlock = EFalse;
+		if (finalBlock)
+			{
+			if (remaining) User::Leave(KErrCorrupt);
+			break;
+			}
+		if (!block.Length()) continue; // acknowledged duplicate, not new bytes
+		if (!remaining) User::Leave(KErrCorrupt); // an extra data block
+		const TInt count = Min(remaining, block.Length());
+		TBuf8<1024> bytes;
+		bytes.Copy(block.Left(count));
+		User::LeaveIfError(cleanup.iFile.Write(bytes));
+		remaining -= count;
+		}
+	User::LeaveIfError(cleanup.iFile.SetSize(aSize));
+	User::LeaveIfError(cleanup.iFile.Flush());
+	cleanup.iFile.Close();
+#if defined(FSHELL_CRYPTO_SUPPORT) && defined(FSHELL_SHA2_SUPPORT)
+	if (digest)
+		{
+		// Verify the flushed file through F32, not just the incoming wire bytes.
+		RFile verify;
+		User::LeaveIfError(verify.Open(FsL(), cleanup.iTemporary, EFileRead | EFileShareReadersOnly));
+		CleanupClosePushL(verify);
+		TBuf8<1024> bytes;
+		TInt checked = 0;
+		for (;;)
+			{
+			User::LeaveIfError(verify.Read(bytes));
+			if (!bytes.Length()) break;
+			if (bytes.Length() > aSize - checked) User::Leave(KErrCorrupt);
+			digest->Update(bytes);
+			checked += bytes.Length();
+			}
+		if (checked != aSize || digest->Final().Compare(iExpectedDigest) != 0) User::Leave(KErrCorrupt);
+		CleanupStack::PopAndDestroy(&verify);
+		CleanupStack::PopAndDestroy(digest);
+		}
+#endif
+	User::LeaveIfError(iOverwrite ? FsL().Replace(cleanup.iTemporary, aName) : FsL().Rename(cleanup.iTemporary, aName));
+	cleanup.iTemporary.Zero();
+	CleanupStack::PopAndDestroy(&cleanup);
 	}
 
 void CCmdYmodem::DoRunL()
 	{
+	if (iExpectedSha256)
+		{
+#if !defined(FSHELL_CRYPTO_SUPPORT) || !defined(FSHELL_SHA2_SUPPORT)
+		User::Leave(KErrNotSupported);
+#else
+		if (iMode != EReceive || iExpectedSha256->Length() != 64) User::Leave(KErrArgument);
+		for (TInt i = 0; i < 64; i += 2)
+			{
+			TInt hi = HexDigit((*iExpectedSha256)[i]), lo = HexDigit((*iExpectedSha256)[i + 1]);
+			if (hi < 0 || lo < 0) User::Leave(KErrArgument);
+			iExpectedDigest.Append((hi << 4) | lo);
+			}
+#endif
+		}
+	if (iMode == ESend && iOutputFileName.Length()) User::Leave(KErrArgument);
+	if (iMode == EReceive && iFileNames.Count() > 1) User::Leave(KErrArgument);
 	PrepareConsoleToTransferL();
-
 	if (iMode == EReceive)
 		{
-		TPtrC receiveDir;
-		if (iFileNames.Count() > 1)
+		TFileName2 receiveDir(iFileNames.Count() ? iFileNames[0] : Env().Pwd());
+		if (!receiveDir.IsDirL(FsL())) User::Leave(KErrPathNotFound);
+		if (iOutputFileName.Length()) iOutputFileName.MakeAbsoluteL(Env().Pwd());
+		TInt received = 0;
+		for (;;)
 			{
-			PrintError(KErrArgument, _L("Too many arguments - only the receive directory may be specified in receive mode."));
-			User::Leave(KErrArgument);
-			}
-		else if (iFileNames.Count() == 1)
-			{
-			TFileName2 fileName(iFileNames[0]);
-			receiveDir.Set(iFileNames[0]);
-
-			if ((fileName.Exists(FsL()) && !fileName.IsDirL(FsL())) || (!fileName.Exists(FsL()) && !iOverwrite))
-				{
-				LeaveIfErr(KErrArgument, _L("\"%S\" is not a directory"), &fileName);
-				}
-			}
-		else
-			{
-			receiveDir.Set(Env().Pwd());
-			}
-
-		Progress(_L("YMODEM receive to \"%S\"\r\n"), &receiveDir);
-		RArray<TFileName2> receivedFiles;
-		CleanupClosePushL(receivedFiles);
-		TFailedFile failedFile;
-		TBool finished(EFalse);
-		while (!finished)
-			{
-			TSyncResult syncResult = SendSyncL();
-			if (syncResult == EEot)
-				{
-				finished = ETrue;
-				}
+			if (SendSyncL() == EEot) User::Leave(KErrCorrupt);
+			iPacketNumber = 0;
+			TBool finalBlock = EFalse;
+			TPtrC block(ReceiveBlockL(ETrue, finalBlock));
+			if (finalBlock) User::Leave(KErrCorrupt);
+			NeoYmodem::THeader header;
+			const TInt parsed = NeoYmodem::ParseHeader(block.Ptr(), block.Length(), header);
+			if (parsed < 0) User::Leave(KErrCorrupt);
+			if (parsed == 0) break;
+			if (received && (iExpectedSha256 || iOutputFileName.Length())) User::Leave(KErrArgument);
+			TBuf8<1024> encodedName;
+			encodedName.Copy(block.Left(header.iNameBytes));
+			HBufC* decodedName = LtkUtils::DecodeUtf8L(encodedName);
+			CleanupStack::PushL(decodedName);
+			TFileName2 destination;
+			if (iOutputFileName.Length()) destination = iOutputFileName;
 			else
 				{
-				iPacketNumber = 0;
-				TBool isFinalBlock(EFalse);
-				TPtrC block(ReceiveBlockL(ETrue, isFinalBlock));
-				TPtrC fileName(block.Ptr()); // filename is the first null terminated string in the block.
-				if (fileName.Length() > 0)
-					{
-					TFileName2 fileName2(fileName);
-					fileName2.MakeAbsoluteL(receiveDir);
-					TLex lex(block.Mid(fileName.Length() + 1));
-					TInt size;
-					User::LeaveIfError(lex.Val(size));
-					TInt err = KErrNone;
-					if (!iOverwrite && fileName2.Exists(FsL()))
-						{
-						err = KErrAlreadyExists;
-						}
-					RFile file;
-					if (err == KErrNone)
-						{
-						if (size == 0)
-							{
-							if (iOverwrite)
-								{
-								err = file.Replace(FsL(), fileName2, EFileWrite);
-								}
-							else
-								{
-								err = file.Create(FsL(), fileName2, EFileWrite);
-								}
-							}
-						else
-							{
-							Progress(_L("Starting receive of \"%S\" (%d bytes)\r\n"), &fileName, size);
-							SendSyncL();
-							TRAP(err, ReceiveToFileL(fileName2));
-							if (err == KErrNone)
-								{
-								err = file.Open(FsL(), fileName2, EFileWrite);
-								if (err == KErrNone)
-									{
-									err = file.SetSize(size);
-									}
-								}
-							else
-								{
-								Fs().Delete(fileName2);
-								}
-							}
-						}
-					else
-						{
-						TRAP_IGNORE(ReceiveToNullL());
-						}
-					file.Close();
-					if (err)
-						{
-						failedFile.iError = err;
-						failedFile.iFileName = fileName2;
-						finished = ETrue;
-						}
-					else
-						{
-						receivedFiles.Append(fileName2); // Ignore error.
-						}
-					}
-				else
-					{
-					finished = ETrue;
-					}
+				if (receiveDir.Length() + decodedName->Length() + 1 > destination.MaxLength()) User::Leave(KErrBadName);
+				destination = *decodedName;
+				destination.MakeAbsoluteL(receiveDir);
 				}
+			CleanupStack::PopAndDestroy(decodedName);
+			ReceiveFileL(destination, header.iSize);
+			++received;
 			}
-
+		if (!received && (iExpectedSha256 || iOutputFileName.Length())) User::Leave(KErrCorrupt);
 		CleanupClonsoleAfterTransferL();
-
-		const TInt numFilesReceived = receivedFiles.Count();
-		if (numFilesReceived == 0)
-			{
-			if (failedFile.iError == KErrNone)
-				{
-				Printf(_L("No files to receive.\r\n"));
-				}
-			}
-		else if (numFilesReceived == 1)
-			{
-			const TFileName2& fileName = receivedFiles[0];
-			Printf(_L("Successfully received \"%S\".\r\n"), &fileName);
-			}
-		else
-			{
-			Printf(_L("Successfully received:\r\n"));
-			for (TInt i = 0; i < numFilesReceived; ++i)
-				{
-				const TFileName2& fileName = receivedFiles[i];
-				Printf(_L("\t\"%S\"\r\n"), &fileName);
-				}
-			}
-
-		if (failedFile.iError)
-			{
-			PrintError(failedFile.iError, _L("Failed to receive \"%S\""), &failedFile.iFileName);
-			}
-		CleanupStack::PopAndDestroy(&receivedFiles);
+		Printf(_L("Successfully received %d file(s).\r\n"), received);
 		}
 	else if (iMode == ESend)
 		{
 		const TInt numFiles = iFileNames.Count();
-		if (numFiles == 0)
-			{
-			PrintError(KErrArgument, _L("No files to send specified"));
-			User::Leave(KErrArgument);
-			}
-		for (TInt i = 0; i < numFiles; ++i)
-			{
-			const TFileName2& fileName = iFileNames[i];
-			if (fileName.Exists(FsL()))
-				{
-				if (fileName.IsDirL(FsL()))
-					{
-					LeaveIfErr(KErrArgument, _L("\"%S\" is not a file"), &fileName);
-					}
-				}
-			else
-				{
-				LeaveIfErr(KErrArgument, _L("\"%S\" does not exist"), &fileName);
-				}
-			}
+		if (!numFiles) User::Leave(KErrArgument);
 		WaitForSyncL();
-		HBufC* buf = HBufC::NewLC(iBlockSize);
+		HBufC* buf = HBufC::NewLC(1024);
 		TPtr bufPtr(buf->Des());
 		for (TInt i = 0; i < numFiles; ++i)
 			{
 			const TFileName2& fileName = iFileNames[i];
-			LeaveIfFileNotFound(fileName);
 			TEntry entry;
 			User::LeaveIfError(FsL().Entry(fileName, entry));
-			bufPtr.SetLength(bufPtr.MaxLength());
-			bufPtr.FillZ();
-			bufPtr.Copy(fileName.NameAndExt());
-			bufPtr.SetLength(buf->Length() + 1); // To leave a terminating null after the file name.
+			if (entry.IsDir() || entry.iSize < 0) User::Leave(KErrArgument);
+			HBufC8* encodedName = LtkUtils::Utf8L(fileName.NameAndExt());
+			CleanupStack::PushL(encodedName);
+			if (encodedName->Length() + 13 > 1024) User::Leave(KErrBadName);
+			iBlockSize = 1024;
+			bufPtr.Copy(*encodedName);
+			bufPtr.Append(0);
 			bufPtr.AppendNum(entry.iSize);
-			if (bufPtr.Length() < iBlockSize)
-				{
-				// There's not enough data to fill this block, so pad with NULL.
-				bufPtr.AppendFill(0, iBlockSize - bufPtr.Length());
-				}
+			bufPtr.AppendFill(0, 1024 - bufPtr.Length());
+			NeoYmodem::THeader header;
+			if (NeoYmodem::ParseHeader(bufPtr.Ptr(), bufPtr.Length(), header) != 1) User::Leave(KErrBadName);
+			CleanupStack::PopAndDestroy(encodedName);
 			iPacketNumber = 0;
-			SendBlockL(*buf);
+			SendBlockL(bufPtr);
 			WaitForSyncL();
 			SendFileL(fileName);
+			WaitForSyncL();
 			}
 		iPacketNumber = 0;
-		bufPtr.SetLength(bufPtr.MaxLength());
+		iBlockSize = 128;
+		bufPtr.SetLength(128);
 		bufPtr.FillZ();
-		SendBlockL(*buf);
+		SendBlockL(bufPtr);
 		CleanupStack::PopAndDestroy(buf);
 		CleanupClonsoleAfterTransferL();
-
-		if (numFiles == 1)
-			{
-			Printf(_L("Successfully sent \"%S\".\r\n"), &iFileNames[0]);
-			}
-		else
-			{
-			Printf(_L("Successfully sent:\r\n"));
-			for (TInt i = 0; i < numFiles; ++i)
-				{
-				const TFileName2& fileName = iFileNames[i];
-				Printf(_L("\t\"%S\"\r\n"), &fileName);
-				}
-			}
+		Printf(_L("Successfully sent %d file(s).\r\n"), numFiles);
 		}
 	User::LeaveIfError(Stdin().CancelCaptureAllKeys());
 	}
@@ -279,5 +257,7 @@ void CCmdYmodem::ArgumentsL(RCommandArgumentList& aArguments)
 void CCmdYmodem::OptionsL(RCommandOptionList& aOptions)
 	{
 	CCmdXmodem::OptionsL(aOptions);
+	aOptions.AppendFileNameL(iOutputFileName, _L("output"));
+	aOptions.AppendStringL(iExpectedSha256, _L("sha256"));
 	}
 
