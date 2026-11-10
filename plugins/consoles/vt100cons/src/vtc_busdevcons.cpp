@@ -25,6 +25,7 @@ public:
 	TBps iRate;
 	TBool iDebug;
 	TBool iWaitDcd;
+	TBool iSizeDetect;
 	};
 
 #define ErrOrDebug(err) (((err) < 0  && (err) != KErrAlreadyExists) ? EError : EDebug)
@@ -70,7 +71,7 @@ _LIT(KPdd, "euart");
 _LIT(KLdd, "ecomm");
 
 TPortConfig::TPortConfig()
-	:iPdd(KNullDesC), iLdd(KNullDesC), iPort(-1), iRate(EBpsAutobaud), iDebug(EFalse), iWaitDcd(EFalse)
+	:iPdd(KNullDesC), iLdd(KNullDesC), iPort(-1), iRate(EBpsAutobaud), iDebug(EFalse), iWaitDcd(EFalse), iSizeDetect(ETrue)
 	{
 	}
 
@@ -82,6 +83,7 @@ TInt CVtcBusDevCommConsole::ReadConfig(const TDesC& aConfigDes, TPortConfig& aCo
 	_LIT(KKeywordRate, "rate");
 	_LIT(KKeywordDebug, "debug");
 	_LIT(KKeywordWaitDcd, "waitdcd");
+	_LIT(KKeywordSizeDetect, "sizedetect");
 
 	TBool keywordFound(EFalse);
 	TLex lex(aConfigDes);
@@ -140,6 +142,14 @@ TInt CVtcBusDevCommConsole::ReadConfig(const TDesC& aConfigDes, TPortConfig& aCo
 			TInt wait;
 			if (valueLex.Val(wait) != KErrNone || !valueLex.Eos() || (wait != 0 && wait != 1)) return KErrArgument;
 			aConfig.iWaitDcd = wait != 0;
+			keywordFound = ETrue;
+			}
+		else if (keyword == KKeywordSizeDetect)
+			{
+			TLex valueLex(value);
+			TInt detect;
+			if (valueLex.Val(detect) != KErrNone || !valueLex.Eos() || (detect != 0 && detect != 1)) return KErrArgument;
+			aConfig.iSizeDetect = detect != 0;
 			keywordFound = ETrue;
 			}
 		else if (keyword == KKeywordDebug)
@@ -226,7 +236,9 @@ void CVtcBusDevCommConsole::ConstructL(const TDesC& aTitle)
 		User::LeaveIfError(iComm.SetConfig(cfg));
 		// Do not reset buffers after carrier: preserve early host input.
 		}
-	CVtcConsoleBase::ConstructL(aTitle);
+	// Machine clients send commands, not DSR replies. The explicit false gate
+	// also overrides console_size_detect=true in a writable user INI file.
+	CVtcConsoleBase::ConstructL(aTitle, portConfig.iSizeDetect);
 	}
 	
 TInt CVtcBusDevCommConsole::Output(const TDesC8& aDes)
