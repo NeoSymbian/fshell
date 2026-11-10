@@ -36,6 +36,8 @@ private: // From CCommandBase.
 private:
 	RArray<TFileName2> iFileNames;
 	TFileName2 iOutputFileName;
+	TFileName iPendingTemporary;
+	TFileName2 iPendingDestination;
 	HBufC* iExpectedSha256;
 	TBuf8<32> iExpectedDigest;
 	};

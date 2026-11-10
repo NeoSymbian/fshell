@@ -33,6 +33,7 @@ CCommandBase* CCmdYmodem::NewLC()
 CCmdYmodem::~CCmdYmodem()
 	{
 	iFileNames.Close();
+	if (iPendingTemporary.Length()) Fs().Delete(iPendingTemporary);
 	delete iExpectedSha256;
 	}
 
@@ -142,7 +143,17 @@ void CCmdYmodem::ReceiveFileL(const TFileName2& aName, TInt aSize)
 		CleanupStack::PopAndDestroy(digest);
 		}
 #endif
-	User::LeaveIfError(iOverwrite ? FsL().Replace(cleanup.iTemporary, aName) : FsL().Rename(cleanup.iTemporary, aName));
+	if (iExpectedSha256 || iOutputFileName.Length())
+		{
+		// A single-file operation is committed only after its empty batch
+		// terminator: reject extra files without changing the destination.
+		iPendingTemporary = cleanup.iTemporary;
+		iPendingDestination = aName;
+		}
+	else
+		{
+		User::LeaveIfError(iOverwrite ? FsL().Replace(cleanup.iTemporary, aName) : FsL().Rename(cleanup.iTemporary, aName));
+		}
 	cleanup.iTemporary.Zero();
 	CleanupStack::PopAndDestroy(&cleanup);
 	}
@@ -201,6 +212,11 @@ void CCmdYmodem::DoRunL()
 			++received;
 			}
 		if (!received && (iExpectedSha256 || iOutputFileName.Length())) User::Leave(KErrCorrupt);
+		if (iPendingTemporary.Length())
+			{
+			User::LeaveIfError(iOverwrite ? FsL().Replace(iPendingTemporary, iPendingDestination) : FsL().Rename(iPendingTemporary, iPendingDestination));
+			iPendingTemporary.Zero();
+			}
 		CleanupClonsoleAfterTransferL();
 		Printf(_L("Successfully received %d file(s).\r\n"), received);
 		}
