@@ -604,10 +604,11 @@ void CCmdXmodem::Unget(TChar aChar)
 void CCmdXmodem::PrepareConsoleToTransferL()
 	{
 	iStarted = ETrue; // restore modes/capture even if preparation itself leaves
-	Write(_L("Please start the file transfer in your terminal...\r\n"));
 	User::LeaveIfError(Stdin().CaptureAllKeys());			// To prevent other things (like fshell) interpreting binary data as special key presses (like cntrl-C).
 	LeaveIfErr(Stdin().SetMode(RIoReadWriteHandle::EBinary), _L("Unable to set stdin to binary mode"));	// To prevent vt100cons from scanning for ANSI escape sequences. 
 	LeaveIfErr(Stdout().SetMode(RIoReadWriteHandle::EBinary), _L("Unable to set stdout to binary mode")); // To tell iosrv to not mess about with line endings.
+	// The host may send immediately after this notice; capture and binary modes must already be ready.
+	Write(_L("Please start the file transfer in your terminal...\r\n"));
 	}
 
 void CCmdXmodem::CleanupClonsoleAfterTransferL()
