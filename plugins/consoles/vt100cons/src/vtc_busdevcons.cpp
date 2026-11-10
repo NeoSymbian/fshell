@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2009 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): development USB carrier lifecycle.
 
 #include <d32comm.h>
 #include <fshell/vtc_base.h>
@@ -24,6 +24,7 @@ public:
 	TInt iPort;
 	TBps iRate;
 	TBool iDebug;
+	TBool iWaitDcd;
 	};
 
 #define ErrOrDebug(err) (((err) < 0  && (err) != KErrAlreadyExists) ? EError : EDebug)
@@ -69,7 +70,7 @@ _LIT(KPdd, "euart");
 _LIT(KLdd, "ecomm");
 
 TPortConfig::TPortConfig()
-	:iPdd(KNullDesC), iLdd(KNullDesC), iPort(-1), iRate(EBpsAutobaud), iDebug(EFalse)
+	:iPdd(KNullDesC), iLdd(KNullDesC), iPort(-1), iRate(EBpsAutobaud), iDebug(EFalse), iWaitDcd(EFalse)
 	{
 	}
 
@@ -80,6 +81,7 @@ TInt CVtcBusDevCommConsole::ReadConfig(const TDesC& aConfigDes, TPortConfig& aCo
 	_LIT(KKeywordPort, "port");
 	_LIT(KKeywordRate, "rate");
 	_LIT(KKeywordDebug, "debug");
+	_LIT(KKeywordWaitDcd, "waitdcd");
 
 	TBool keywordFound(EFalse);
 	TLex lex(aConfigDes);
@@ -132,6 +134,14 @@ TInt CVtcBusDevCommConsole::ReadConfig(const TDesC& aConfigDes, TPortConfig& aCo
 				}
 			keywordFound = ETrue;
 			}
+		else if (keyword == KKeywordWaitDcd)
+			{
+			TLex valueLex(value);
+			TInt wait;
+			if (valueLex.Val(wait) != KErrNone || !valueLex.Eos() || (wait != 0 && wait != 1)) return KErrArgument;
+			aConfig.iWaitDcd = wait != 0;
+			keywordFound = ETrue;
+			}
 		else if (keyword == KKeywordDebug)
 			{
 			aConfig.iDebug = ETrue;
@@ -173,10 +183,11 @@ void CVtcBusDevCommConsole::ConstructL(const TDesC& aTitle)
 	Message(ErrOrDebug(err), _L("Opening port %d returned %d"), portConfig.iPort, err);
 	User::LeaveIfError(err);
 
-	if (portConfig.iRate != EBpsAutobaud)
+	if (portConfig.iRate != EBpsAutobaud || portConfig.iWaitDcd)
 		{
 		TCommConfig cfg;
-		cfg().iRate = portConfig.iRate;
+		iComm.Config(cfg);
+		if (portConfig.iRate != EBpsAutobaud) cfg().iRate = portConfig.iRate;
 		cfg().iDataBits = EData8;
 		cfg().iStopBits = EStop1;
 		cfg().iParity = EParityNone;
@@ -191,6 +202,30 @@ void CVtcBusDevCommConsole::ConstructL(const TDesC& aTitle)
 		User::LeaveIfError(err);
 		}
 	iComm.ResetBuffers();
+	if (portConfig.iWaitDcd)
+		{
+		// The USB PDD maps host DTR to DCD. Subscribe before checking so an
+		// open racing this construction cannot leave the shell waiting forever.
+		for (;;)
+			{
+			TRequestStatus status;
+			TUint signals = 0;
+			iComm.NotifySignalChange(status, signals, KSignalDCD);
+			if (iComm.Signals() & KSignalDCD)
+				{
+				iComm.NotifySignalChangeCancel();
+				User::WaitForRequest(status);
+				break;
+				}
+			User::WaitForRequest(status);
+			User::LeaveIfError(status.Int());
+			}
+		TCommConfig cfg;
+		iComm.Config(cfg);
+		cfg().iHandshake = KConfigObeyDCD | KConfigFailDCD;
+		User::LeaveIfError(iComm.SetConfig(cfg));
+		// Do not reset buffers after carrier: preserve early host input.
+		}
 	CVtcConsoleBase::ConstructL(aTitle);
 	}
 	
