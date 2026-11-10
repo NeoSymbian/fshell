@@ -2,13 +2,13 @@
 # 
 # Copyright (c) 2010 Accenture. All rights reserved.
 # This component and the accompanying materials are made available
-# under the terms of the "Eclipse Public License v1.0"
+# under the terms of the "Eclipse Public License v2.0"
 # which accompanies this distribution, and is available
-# at the URL "http://www.eclipse.org/legal/epl-v10.html".
-# 
+# at the URL "https://www.eclipse.org/legal/epl-2.0/".
+# SPDX-License-Identifier: EPL-2.0
 # Initial Contributors:
 # Accenture - Initial contribution
-#
+# The NeoSymbian Authors (2026): binary-safe debug access.
 
 ==name hash
 
@@ -37,6 +37,10 @@ The name of the file whose data is to be hashed. If not specified, data is read 
 ==option filename o output
 
 The name of the file to write the hash to. If not specified, the hash is ASCII / hex dumped to STDOUT.
+
+==option bool x hex
+
+Write a single lowercase hexadecimal digest line to STDOUT, without offsets or ASCII columns. File input is read as raw bytes.
 
 ==option enum a algorithm
 

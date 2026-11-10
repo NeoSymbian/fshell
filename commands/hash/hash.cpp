@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2009 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): binary-safe debug access.
 
 #include <fshell/ioutils.h>
 #include <fshell/ltkutils.h>
@@ -33,18 +33,20 @@ private: // From CCommandBase.
 	virtual void OptionsL(RCommandOptionList& aOptions);
 private:
 	TBool iVerbose;
+	TBool iHex;
 	TFileName2 iInputFileName;
 	TFileName2 iOutputFileName;
 	enum TAlgorithm
 		{
+		// Keep the order identical to hash.cif's algorithm enum.
 		ESha1,
+		EMd2,
+		EMd4,
+		EMd5,
 		ESha224,
 		ESha256,
 		ESha384,
-		ESha512,
-		EMd2,
-		EMd4,
-		EMd5
+		ESha512
 		} iAlgorithm;
 	CMessageDigest* iMessageDigest;
 	};
@@ -107,39 +109,38 @@ void CCmdHash::DoRunL()
 	{
 	iMessageDigest = CMessageDigestFactory::NewDigestL(HashIdL());
 
-	RIoReadHandle readHandle;
-	readHandle.Create(IoSession());
-	CleanupClosePushL(readHandle);
-
-	RIoFile ioFile;
 	if (iOptions.IsPresent(&iInputFileName))
 		{
-		LeaveIfErr(ioFile.Create(IoSession(), iInputFileName, RIoFile::ERead), _L("Couldn't open handle to file '%S'"), &iInputFileName);
-		CleanupClosePushL(ioFile);
-		LeaveIfErr(ioFile.Attach(readHandle, RIoEndPoint::EForeground), _L("Couldn't attach read handle to file object"));
+		// RIoFile is a UTF-8 text endpoint. File digests must see every byte,
+		// including malformed UTF-8, NUL and all values above 0x7f.
+		RFile file;
+		LeaveIfErr(file.Open(FsL(), iInputFileName, EFileRead | EFileShareReadersOnly), _L("Couldn't open '%S'"), &iInputFileName);
+		CleanupClosePushL(file);
+		TBuf8<KBlockSize> bytes;
+		for (;;)
+			{
+			LeaveIfErr(file.Read(bytes), _L("Unable to read input file"));
+			if (bytes.Length() == 0) break;
+			iMessageDigest->Update(bytes);
+			}
+		CleanupStack::PopAndDestroy(&file);
 		}
 	else
 		{
+		// Retain the shell's existing text-pipeline input behavior.
+		RIoReadHandle readHandle;
+		CleanupClosePushL(readHandle);
+		LeaveIfErr(readHandle.Create(IoSession()), _L("Couldn't create input handle"));
 		LeaveIfErr(readHandle.Duplicate(Stdin()), _L("Couldn't duplicate STDIN"));
-		}
-
-	LeaveIfErr(readHandle.SetReadMode(RIoReadHandle::EOneOrMore), _L("Couldn't set read handle into read one or more mode"));
-
-	TBuf<KBlockSize> buf;
-	TInt err = KErrNone;
-	do
-		{
-		err = readHandle.Read(buf);
-		if (err == KErrNone)
+		LeaveIfErr(readHandle.SetReadMode(RIoReadHandle::EOneOrMore), _L("Couldn't set input mode"));
+		TBuf<KBlockSize> buf;
+		TInt err;
+		while ((err = readHandle.Read(buf)) == KErrNone)
 			{
 			iMessageDigest->Update(buf.Collapse());
 			}
-		}
-		while (err == KErrNone);
-
-	if (err != KErrEof)
-		{
-		LeaveIfErr(err, _L("Unable to read input"));
+		if (err != KErrEof) LeaveIfErr(err, _L("Unable to read input"));
+		CleanupStack::PopAndDestroy(&readHandle);
 		}
 
 	TPtrC8 hash(iMessageDigest->Final());
@@ -149,25 +150,32 @@ void CCmdHash::DoRunL()
 		RFile outputFile;
 		LeaveIfErr(outputFile.Create(FsL(), iOutputFileName, EFileWrite), _L("Couldn't create '%S'"), &iOutputFileName);
 		CleanupClosePushL(outputFile);
-		outputFile.Write(hash);
+		LeaveIfErr(outputFile.Write(hash), _L("Unable to write hash"));
+		LeaveIfErr(outputFile.Flush(), _L("Unable to flush hash"));
 		CleanupStack::PopAndDestroy(&outputFile);
+		}
+	else if (iHex)
+		{
+		_LIT(KHex, "0123456789abcdef");
+		TBuf<130> output;
+		for (TInt i = 0; i < hash.Length(); ++i)
+			{
+			output.Append(KHex()[hash[i] >> 4]);
+			output.Append(KHex()[hash[i] & 15]);
+			}
+		output.Append(_L("\r\n"));
+		LeaveIfErr(Stdout().Write(output), _L("Unable to write hash"));
 		}
 	else
 		{
 		LtkUtils::HexDumpToOutput(hash, Stdout());
 		}
-
-	if (iOptions.IsPresent(&iInputFileName))
-		{
-		CleanupStack::PopAndDestroy(&ioFile);
-		}
-
-	CleanupStack::PopAndDestroy(&readHandle);
 	}
 
 void CCmdHash::OptionsL(RCommandOptionList& aOptions)
 	{
 	aOptions.AppendBoolL(iVerbose, _L("verbose"));
+	aOptions.AppendBoolL(iHex, _L("hex"));
 	aOptions.AppendFileNameL(iInputFileName, _L("input"));
 	aOptions.AppendFileNameL(iOutputFileName, _L("output"));
 	aOptions.AppendEnumL((TInt&)iAlgorithm, _L("algorithm"));
