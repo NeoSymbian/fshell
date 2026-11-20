@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2009 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): bulk binary console reads.
 
 #include "vtc_base.h"
 #include <fshell/common.mmh>
@@ -63,6 +63,18 @@ EXPORT_C TInt CVtcConsoleBase::Extension_(TUint aExtensionId, TAny*& a0, TAny* a
 		ConsoleMode::TMode mode = (ConsoleMode::TMode)(TInt)a1;
 		iInputController->SetMode(mode);
 		iOutputController->SetMode(mode);
+		return KErrNone;
+		}
+	else if (aExtensionId == ConsoleBinaryRead::KConsoleBinaryReadExtension)
+		{
+		if (a1)
+			{
+			iInputController->GetBinary(*(TDes8*)a0, *(TRequestStatus*)a1);
+			}
+		else
+			{
+			iInputController->CancelGetBinary();
+			}
 		return KErrNone;
 		}
 	else if (aExtensionId == ConsoleAttributes::KSetConsoleAttributesExtension)

@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2009 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): bulk binary console reads.
 
 // Dummy class used to allow calls into protected Extension_ in a CBase derived class.
 class CBaseExtensionDummy : public CBase
@@ -77,6 +77,22 @@ void ConsoleSize::NotifySizeChanged(CBase* aConsole, TRequestStatus& aStatus)
 		TRequestStatus* stat = &aStatus;
 		User::RequestComplete(stat, KErrExtensionNotSupported);
 		}
+	}
+
+void ConsoleBinaryRead::Read(CBase* aConsole, TDes8& aBuf, TRequestStatus& aStatus)
+	{
+	TAny* buf = &aBuf;
+	if (((CBaseExtensionDummy*)aConsole)->Extension_(KConsoleBinaryReadExtension, buf, (TAny*)&aStatus) != KErrNone)
+		{
+		TRequestStatus* stat = &aStatus;
+		User::RequestComplete(stat, KErrExtensionNotSupported);
+		}
+	}
+
+void ConsoleBinaryRead::ReadCancel(CBase* aConsole)
+	{
+	TAny* ignore;
+	((CBaseExtensionDummy*)aConsole)->Extension_(KConsoleBinaryReadExtension, ignore, NULL);
 	}
 
 void ConsoleSize::CancelNotifySizeChanged(CBase* aConsole)

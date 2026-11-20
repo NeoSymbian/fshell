@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2008 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): bulk binary console reads.
 
 #include <e32base.h>
 #include <fshell/common.mmh>
@@ -663,6 +663,42 @@ EXPORT_C void CVtConsoleInputController::GetKeyPress(TKeyPress& aKeyPress, TRequ
 		}
 	}
 
+void CVtConsoleInputController::GetBinary(TDes8& aBuf, TRequestStatus& aStatus)
+	{
+	ASSERT((iClientRequestStatus == NULL) && (iBinaryStatus == NULL));
+	iBinaryBuf = &aBuf;
+	iBinaryStatus = &aStatus;
+	*iBinaryStatus = KRequestPending;
+	if (iMode != ConsoleMode::EBinary)
+		{
+		CompleteBinary(KErrNotSupported);
+		}
+	else if (iInputError)
+		{
+		CompleteBinary(iInputError);
+		iInputError = KErrNone;
+		}
+	else
+		{
+		ProcessInputBuffer();
+		}
+	}
+
+void CVtConsoleInputController::CancelGetBinary()
+	{
+	Cancel();
+	if (iBinaryStatus)
+		{
+		CompleteBinary(KErrCancel);
+		}
+	}
+
+void CVtConsoleInputController::CompleteBinary(TInt aError)
+	{
+	iBinaryBuf = NULL;
+	User::RequestComplete(iBinaryStatus, aError);
+	}
+
 EXPORT_C void CVtConsoleInputController::CancelGetKeyPress()
 	{
 	Cancel();
@@ -681,6 +717,15 @@ EXPORT_C void CVtConsoleInputController::SetMode(ConsoleMode::TMode aMode)
 void CVtConsoleInputController::ProcessInputBuffer()
 	{
 	iEscapeTimer->Cancel();
+
+	if (iBinaryStatus && (iBufPos < iBuf.Length()))
+		{
+		// Everything buffered in one request: one round trip per comm read instead of one per byte.
+		const TInt count = Min(iBuf.Length() - iBufPos, iBinaryBuf->MaxLength() - iBinaryBuf->Length());
+		iBinaryBuf->Append(iBuf.Mid(iBufPos, count));
+		iBufPos += count;
+		CompleteBinary(KErrNone);
+		}
 
 	while (iClientRequestStatus && (iBufPos < iBuf.Length()))
 		{
@@ -796,7 +841,7 @@ void CVtConsoleInputController::Reset()
 
 void CVtConsoleInputController::RequestInput()
 	{
-	if (iClientRequestStatus && !IsActive()) // Note, if the escape timer expired we could already be active.
+	if ((iClientRequestStatus || iBinaryStatus) && !IsActive()) // Note, if the escape timer expired we could already be active.
 		{
 		ASSERT(iBufPos == iBuf.Length());
 		iBufPos = 0;
@@ -823,6 +868,10 @@ void CVtConsoleInputController::RunL()
 	else if (iClientRequestStatus)
 		{
 		CompleteReadRequest(err);
+		}
+	else if (iBinaryStatus)
+		{
+		CompleteBinary(err);
 		}
 	else
 		{
