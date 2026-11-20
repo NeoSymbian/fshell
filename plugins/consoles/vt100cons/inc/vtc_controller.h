@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2008 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): bulk binary console reads.
 
 #ifndef __VTC_CONTROLLER_H__
 #define __VTC_CONTROLLER_H__
@@ -87,6 +87,8 @@ public:
 	IMPORT_C void GetKeyPress(TKeyPress& aKeyPress, TRequestStatus& aStatus);
 	IMPORT_C void CancelGetKeyPress();
 	IMPORT_C void SetMode(ConsoleMode::TMode aMode);
+	void GetBinary(TDes8& aBuf, TRequestStatus& aStatus);	// ConsoleBinaryRead (binary mode only)
+	void CancelGetBinary();
 public:
 	virtual ~CVtConsoleInputController();
 private:
@@ -100,6 +102,7 @@ private:
 	void CompleteReadRequest(TInt aError);
 	void CompleteReadRequest(TKeyCode aKeyCode);
 	void CompleteReadRequest(TKeyCode aKeyCode1, TKeyCode aKeyCode2);
+	void CompleteBinary(TInt aError);
 	void Reset();
 	void RequestInput();
 private: // From CActive.
@@ -128,6 +131,8 @@ private:
 	TKeyCode iPendingKeyCode;
 	TInt iInputError;
 	TBuf8<4> iExtendedEscapeBuf;
+	TDes8* iBinaryBuf;
+	TRequestStatus* iBinaryStatus;
 	};
 	
 #endif //__VTC_CONTROLLER_H__

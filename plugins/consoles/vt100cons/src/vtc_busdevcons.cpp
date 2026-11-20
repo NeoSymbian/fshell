@@ -8,7 +8,7 @@
 // SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-// The NeoSymbian Authors (2026): development USB carrier lifecycle.
+// The NeoSymbian Authors (2026): development USB carrier lifecycle; exact reads.
 
 #include <d32comm.h>
 #include <fshell/vtc_base.h>
@@ -261,7 +261,10 @@ retry:
 
 void CVtcBusDevCommConsole::Input(TDes8& aDes, TRequestStatus& aStatus)
 	{
-	iComm.ReadOneOrMore(aStatus, aDes);
+	// Exactly what ECOMM holds, or one byte: either completes as soon as the bytes are there. ReadOneOrMore instead
+	// waits out ECOMM's 5 ms inter-character timer unless it fills aDes (d_comm.cpp), once per short read.
+	const TInt buffered = iComm.QueryReceiveBuffer();
+	iComm.Read(aStatus, aDes, (buffered > 0) ? Min(buffered, aDes.MaxLength()) : 1);
 	}
 
 void CVtcBusDevCommConsole::CancelInput(TRequestStatus&)

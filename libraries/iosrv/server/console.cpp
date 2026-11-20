@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2006 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): bulk binary console reads.
 
 #include <e32cons.h>
 #include <e32uid.h>
@@ -263,6 +263,43 @@ void CIoConsole::ReadComplete(TInt aError)
 
 void CIoConsole::ReadComplete(TUint aKeyCode, TUint aModifiers)
 	{
+	DeliverKey(aKeyCode, aModifiers);
+	QueueReaderIfRequired();
+	}
+
+TInt CIoConsole::BinaryReadLength()
+	{
+	// A binary transfer (xmodem, ymodem) reads with all keys captured: its bytes go straight into the foreground
+	// reader's buffer. Anything else (key reads, text mode, background readers) keeps the per-key path.
+	MIoReader* reader = AttachedReader(0);
+	if (reader && reader->IorReadPending() && reader->IorAllKeysCaptured() && (reader->IorwMode() == RIoReadWriteHandle::EBinary))
+		{
+		return reader->IorReadBuf().MaxLength();
+		}
+	return 0;
+	}
+
+void CIoConsole::BinaryReadComplete(const TDesC8& aData)
+	{
+	TInt done = 0;
+	MIoReader* reader = AttachedReader(0);
+	if (reader && reader->IorReadPending() && reader->IorAllKeysCaptured())
+		{
+		TDes& buf = reader->IorReadBuf();
+		done = Min(aData.Length(), buf.MaxLength());
+		buf.Copy(aData.Left(done)); // widens each byte, as the per-key path does
+		reader->IorDataBuffered(done);
+		}
+	// The reader went away or shrank meanwhile: the rest goes the per-key way, in order.
+	for (; done < aData.Length(); ++done)
+		{
+		DeliverKey(aData[done], 0);
+		}
+	QueueReaderIfRequired();
+	}
+
+void CIoConsole::DeliverKey(TUint aKeyCode, TUint aModifiers)
+	{
 	TInt index = 0;
 	MIoReader* foregroundReader = AttachedReader(index++);
 	MIoReader* reader = foregroundReader;
@@ -283,8 +320,6 @@ void CIoConsole::ReadComplete(TUint aKeyCode, TUint aModifiers)
 		{
 		foregroundReader->IorReadKeyComplete(KErrNone, aKeyCode, aModifiers);
 		}
-
-	QueueReaderIfRequired();
 	}
 
 void CIoConsole::QueueReaderIfRequired()
@@ -331,13 +366,26 @@ CIoConsole::CConsoleReader::~CConsoleReader()
 
 void CIoConsole::CConsoleReader::QueueRead()
 	{
-	iConsole.iConsole.Read(iKeyCodePckg, iKeyModifiersPckg, iStatus);
+	const TInt length = (iBinaryUnsupported || iKeysNext) ? 0 : Min(iConsole.BinaryReadLength(), iBinaryBuf.MaxLength());
+	iKeysNext = EFalse;
+	iBinary = (length > 0);
+	if (iBinary)
+		{
+		iBinaryBuf.Zero();
+		TPtr8 ptr(const_cast<TUint8*>(iBinaryBuf.Ptr()), 0, length);
+		iBinaryPtr.Set(ptr);
+		iConsole.iConsole.ReadBinary(iBinaryPtr, iStatus);
+		}
+	else
+		{
+		iConsole.iConsole.Read(iKeyCodePckg, iKeyModifiersPckg, iStatus);
+		}
 	SetActive();
 	}
 
 CIoConsole::CConsoleReader::CConsoleReader(CIoConsole& aConsole)
 	: CActive(CActive::EPriorityStandard), iConsole(aConsole)
-	, iKeyCodePckg(iKeyCode), iKeyModifiersPckg(iKeyModifiers)
+	, iKeyCodePckg(iKeyCode), iKeyModifiersPckg(iKeyModifiers), iBinaryPtr(NULL, 0)
 	{
 	CActiveScheduler::Add(this);
 	}
@@ -350,9 +398,20 @@ void CIoConsole::CConsoleReader::RunL()
 		iConsole.ConsoleDied();
 		err = KErrGeneral;
 		}
-	if (err)
+	if (iBinary && ((err == KErrExtensionNotSupported) || (err == KErrNotSupported)))
+		{
+		iBinaryUnsupported = (err == KErrExtensionNotSupported);
+		iKeysNext = ETrue;
+		iBinary = EFalse;
+		iConsole.QueueReaderIfRequired(); // again, as keys
+		}
+	else if (err)
 		{
 		iConsole.ReadComplete(err);
+		}
+	else if (iBinary)
+		{
+		iConsole.BinaryReadComplete(iBinaryPtr);
 		}
 	else
 		{
@@ -362,7 +421,14 @@ void CIoConsole::CConsoleReader::RunL()
 
 void CIoConsole::CConsoleReader::DoCancel()
 	{
-	iConsole.iConsole.ReadCancel();
+	if (iBinary)
+		{
+		iConsole.iConsole.ReadBinaryCancel();
+		}
+	else
+		{
+		iConsole.iConsole.ReadCancel();
+		}
 	}
 
 //______________________________________________________________________________
@@ -869,6 +935,16 @@ void RIoConsoleProxy::CancelNotifySizeChanged()
 	SendReceive(ECancelNotifySizeChange, TIpcArgs());
 	}
 
+void RIoConsoleProxy::ReadBinary(TDes8& aBuf, TRequestStatus& aStatus)
+	{
+	SendReceive(EReadBinary, TIpcArgs(&aBuf), aStatus);
+	}
+
+void RIoConsoleProxy::ReadBinaryCancel()
+	{
+	SendReceive(EReadBinaryCancel, TIpcArgs());
+	}
+
 //______________________________________________________________________________
 //						CIoConsoleProxyServer
 CConsoleProxyServer* CIoConsoleProxyServerNewL(TAny* aParams)
@@ -982,6 +1058,7 @@ CIoConsoleProxySession::CIoConsoleProxySession(TConsoleCreateFunction aConsoleCr
 CIoConsoleProxySession::~CIoConsoleProxySession()
 	{
 	delete iSizeChangedMessageCompleter;
+	delete iBinaryReadCompleter;
 	delete iUnderlyingConsole;
 	}
 
@@ -1043,6 +1120,25 @@ void CIoConsoleProxySession::ServiceL(const RMessage2& aMessage)
 			if (iConsole) iSizeChangedMessageCompleter->SetConsole(iConsole->Console());
 			}
 		iSizeChangedMessageCompleter->NotifySizeChange(const_cast<RMessage2&>(aMessage));
+		return;
+		}
+	case RIoConsoleProxy::EReadBinary:
+		{
+		if (!iConsole) User::Leave(KErrNotReady);
+		if (iBinaryReadCompleter == NULL)
+			{
+			iBinaryReadCompleter = new(ELeave) CBinaryReadMessageCompleter(iConsole->Console());
+			}
+		iBinaryReadCompleter->ReadL(aMessage);
+		return;
+		}
+	case RIoConsoleProxy::EReadBinaryCancel:
+		{
+		if (iBinaryReadCompleter)
+			{
+			iBinaryReadCompleter->CancelRead();
+			}
+		aMessage.Complete(KErrNone);
 		return;
 		}
 	case RIoConsoleProxy::ECancelNotifySizeChange:
@@ -1520,6 +1616,59 @@ void CSizeChangeMessageCompleter::SetConsole(CConsoleBase* aConsole)
 		{
 		ConsoleSize::NotifySizeChanged(iActualConsole, iStatus);
 		SetActive();
+		}
+	}
+
+CBinaryReadMessageCompleter::CBinaryReadMessageCompleter(CConsoleBase* aConsole)
+	: CActive(CActive::EPriorityStandard), iConsole(aConsole), iPtr(NULL, 0)
+	{
+	CActiveScheduler::Add(this);
+	}
+
+CBinaryReadMessageCompleter::~CBinaryReadMessageCompleter()
+	{
+	Cancel();
+	iBuf.Close();
+	}
+
+void CBinaryReadMessageCompleter::ReadL(const RMessage2& aMessage)
+	{
+	const TInt length = aMessage.GetDesMaxLengthL(0);
+	if (IsActive() || (length <= 0)) User::Leave(KErrArgument);
+	if (iBuf.MaxLength() < length)
+		{
+		iBuf.Close();
+		iBuf.CreateL(length);
+		}
+	iBuf.Zero();
+	iMessage = aMessage;
+	TPtr8 ptr(const_cast<TUint8*>(iBuf.Ptr()), 0, length);
+	iPtr.Set(ptr);
+	ConsoleBinaryRead::Read(iConsole, iPtr, iStatus);
+	SetActive();
+	}
+
+void CBinaryReadMessageCompleter::RunL()
+	{
+	TInt err = iStatus.Int();
+	if (err == KErrNone)
+		{
+		err = iMessage.Write(0, iPtr);
+		}
+	iMessage.Complete(err);
+	}
+
+void CBinaryReadMessageCompleter::DoCancel()
+	{
+	ConsoleBinaryRead::ReadCancel(iConsole);
+	}
+
+void CBinaryReadMessageCompleter::CancelRead()
+	{
+	Cancel();
+	if (!iMessage.IsNull())
+		{
+		iMessage.Complete(KErrCancel);
 		}
 	}
 

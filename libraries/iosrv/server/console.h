@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2006 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): bulk binary console reads.
 
 #ifndef __CONSOLE_H__
 #define __CONSOLE_H__
@@ -33,6 +33,8 @@ public:
 		EWriteStdErr,
 		ENotifySizeChange,
 		ECancelNotifySizeChange,
+		EReadBinary,
+		EReadBinaryCancel,
 		};
 public:
 	TInt SetLazyConstruct();
@@ -42,6 +44,8 @@ public:
 	void WriteStdErr(const TDesC& aDescriptor, TRequestStatus& aStatus);
 	void NotifySizeChanged(TRequestStatus& aStatus);
 	void CancelNotifySizeChanged();
+	void ReadBinary(TDes8& aBuf, TRequestStatus& aStatus);
+	void ReadBinaryCancel();
 	};
 	
 class CIoConsole : public CIoEndPoint
@@ -79,6 +83,9 @@ private:
 	void ConstructL(const TDesC& aImplementation, const TDesC& aTitle, const TSize& aSize, CIoConsole* aUnderlying, TUint aOptions);
 	void ReadComplete(TInt aError);
 	void ReadComplete(TUint aKeyCode, TUint aModifiers);
+	void DeliverKey(TUint aKeyCode, TUint aModifiers);
+	TInt BinaryReadLength();
+	void BinaryReadComplete(const TDesC8& aData);
 	void QueueReaderIfRequired();
 	void CreateComplete(TInt aError);
 	void NewRequest(TConsoleRequest* aRequest) const;
@@ -103,6 +110,11 @@ private:
 		TUint iKeyModifiers;
 		TPckg<TKeyCode> iKeyCodePckg;
 		TPckg<TUint> iKeyModifiersPckg;
+		TBuf8<4096> iBinaryBuf;
+		TPtr8 iBinaryPtr;			// iBinaryBuf, limited to the reader's free room
+		TBool iBinary;				// the outstanding read is a ConsoleBinaryRead
+		TBool iBinaryUnsupported;	// the console has no ConsoleBinaryRead: keys only
+		TBool iKeysNext;			// the console isn't in binary mode yet: one key read first
 		};
 		
 	class TConsoleRequest
@@ -375,6 +387,23 @@ private:
 	CConsoleBase* iActualConsole;
 	};
 
+class CBinaryReadMessageCompleter : public CActive
+	{
+public:
+	CBinaryReadMessageCompleter(CConsoleBase* aConsole);
+	~CBinaryReadMessageCompleter();
+	void ReadL(const RMessage2& aMessage);
+	void CancelRead();
+protected:
+	void RunL();
+	void DoCancel();
+private:
+	RMessagePtr2 iMessage;
+	CConsoleBase* iConsole;
+	RBuf8 iBuf;
+	TPtr8 iPtr;
+	};
+
 class CIoConsoleProxySession : public CConsoleProxySession
 	{
 public:
@@ -405,6 +434,7 @@ private:
 	TUint iFlags;
 	TSize iDetectedSize;
 	CSizeChangeMessageCompleter* iSizeChangedMessageCompleter;
+	CBinaryReadMessageCompleter* iBinaryReadCompleter;
 	};
 	
 class CWriteOnlyConsoleProxy : public CConsoleProxy

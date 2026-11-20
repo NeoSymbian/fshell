@@ -2,13 +2,13 @@
 // 
 // Copyright (c) 2008 - 2010 Accenture. All rights reserved.
 // This component and the accompanying materials are made available
-// under the terms of the "Eclipse Public License v1.0"
+// under the terms of the "Eclipse Public License v2.0"
 // which accompanies this distribution, and is available
-// at the URL "http://www.eclipse.org/legal/epl-v10.html".
-// 
+// at the URL "https://www.eclipse.org/legal/epl-2.0/".
+// SPDX-License-Identifier: EPL-2.0
 // Initial Contributors:
 // Accenture - Initial contribution
-//
+// The NeoSymbian Authors (2026): bulk binary console reads.
 
 #ifndef __CONSOLEEXTENSIONS_H__
 #define __CONSOLEEXTENSIONS_H__
@@ -139,6 +139,20 @@ public:
 	*/
 	static inline void NotifySizeChanged(CBase* aConsole, TRequestStatus& aStatus);
 	static inline void CancelNotifySizeChanged(CBase* aConsole);
+	};
+
+class ConsoleBinaryRead
+	{
+public:
+	static const TUint KConsoleBinaryReadExtension = 0x4E534231; // NeoSymbian
+public:
+	/**
+	In binary mode, read the bytes the console already has (or wait for at least one) into aBuf, up to its
+	MaxLength, in one request instead of one key at a time. If not supported, aStatus is completed with
+	KErrExtensionNotSupported. Only one read (key or binary) may be outstanding on a console at a time.
+	*/
+	static inline void Read(CBase* aConsole, TDes8& aBuf, TRequestStatus& aStatus);
+	static inline void ReadCancel(CBase* aConsole);
 	};
 
 // BC on this interface is not guaranteed - only for use by things inside /fshell/plugins/consoles
